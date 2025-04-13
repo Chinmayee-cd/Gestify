@@ -1,193 +1,253 @@
 import cv2
 import mediapipe as mp
-import numpy as np
-import random
 import time
+import numpy as np
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.models import Sequential #type: ignore
+from tensorflow.keras.layers import Dense, Dropout #type: ignore
+from tensorflow.keras.optimizers import Adam, RMSprop, SGD #type: ignore
+from sklearn.preprocessing import StandardScaler
 from collections import deque
-import math
+import random
+import tensorflow as tf #type: ignore
 
 # Constants
-MAX_FRAMES_WITHOUT_GESTURE = 30
-MIN_DETECTION_CONFIDENCE = 0.5
-MIN_TRACKING_CONFIDENCE = 0.5
+MIN_DETECTION_CONFIDENCE = 0.7
+MIN_TRACKING_CONFIDENCE = 0.7
+NUM_LANDMARKS = 21 * 3  # 21 landmarks with x, y, z coordinates
+NUM_GESTURES = 10  # 0 to 9
+SMOOTHING_FRAMES=5
 
+# Adaptive Evolutionary Learning Model (AELM)
 class AELM:
-    """Adaptive Evolutionary Learning Model for optimizer selection"""
-    def __init__(self, mutation_rate=0.2, population_size=5):
+    def __init__(self, mutation_rate=0.2):
         self.mutation_rate = mutation_rate
-        self.population_size = population_size
-        self.optimizers = ['adam', 'rmsprop', 'sgd', 'nadam']
-    
-    def evolve_optimizer(self):
-        best_optimizer = random.choice(self.optimizers)
-        for _ in range(self.population_size):
-            if random.random() < self.mutation_rate:
-                best_optimizer = random.choice(self.optimizers)
-        return best_optimizer
+        self.optimizers = ['adam', 'rmsprop', 'sgd']
 
+    def evolve_optimizer(self, current_accuracy):
+        if current_accuracy < 0.85 and random.random() < self.mutation_rate:
+            return random.choice(self.optimizers)
+        return 'adam'  # Default
+
+# Manta Ray Foraging Optimization (MRFO)
 class MRFO:
-    """Manta Ray Foraging Optimization for parameter tuning"""
-    def __init__(self, max_iter=10, population_size=5):
-        self.max_iter = max_iter
-        self.population_size = population_size
-    
-    def optimize_parameters(self):
-        confidences = np.linspace(0.3, 0.7, 5)
-        max_hands = [1, 2]
-        best_confidence = random.choice(confidences)
-        best_max_hands = random.choice(max_hands)
-        
-        for _ in range(self.max_iter):
-            if random.random() < 0.5:  # Chain foraging
-                best_confidence = min(0.9, best_confidence + 0.1)
-            else:  # Cyclone foraging
-                best_confidence = max(0.3, best_confidence - 0.1)
-        
-        return best_confidence, best_max_hands
+    def optimize_hyperparams(self):
+        lr = random.choice([0.001, 0.0005, 0.01])
+        dropout = random.choice([0.2, 0.3, 0.4])
+        return lr, dropout
 
-class GestureRecognizer:
-    """Custom gesture recognition using hand landmarks"""
-    def __init__(self):
-        self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(
-            max_num_hands=2,
-            min_detection_confidence=0.7,
-            min_tracking_confidence=0.5
-        )
-        self.mp_drawing = mp.solutions.drawing_utils
-    
-    def _get_hand_angles(self, landmarks):
-        """Calculate key angles between finger joints"""
-        # Get vectors between key points
-        vectors = []
-        for i in range(21):  # 21 landmarks per hand
-            vectors.append([landmarks[i].x, landmarks[i].y, landmarks[i].z])
-        
-        vectors = np.array(vectors)
-        
-        # Calculate angles between important joints
-        thumb_angle = self._angle_between(
-            vectors[2]-vectors[1], vectors[3]-vectors[2])
-        index_angle = self._angle_between(
-            vectors[6]-vectors[5], vectors[7]-vectors[6])
-        middle_angle = self._angle_between(
-            vectors[10]-vectors[9], vectors[11]-vectors[10])
-        
-        return thumb_angle, index_angle, middle_angle
-    
-    def _angle_between(self, v1, v2):
-        """Returns the angle in degrees between vectors v1 and v2"""
-        v1_u = v1 / np.linalg.norm(v1)
-        v2_u = v2 / np.linalg.norm(v2)
-        return np.degrees(np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0)))
-    
-    def recognize_gesture(self, landmarks):
-        """Recognize specific gestures from hand landmarks"""
-        thumb_angle, index_angle, middle_angle = self._get_hand_angles(landmarks)
-        
-        # Thumbs up detection
-        if thumb_angle < 30 and index_angle > 90 and middle_angle > 90:
-            return "Thumbs Up"
-        
-        # Thumbs down detection
-        if thumb_angle > 150 and index_angle > 90 and middle_angle > 90:
-            return "Thumbs Down"
-        
-        # Victory sign (peace sign)
-        if index_angle < 30 and middle_angle < 30 and thumb_angle > 90:
-            return "Victory"
-        
-        # OK sign
-        if thumb_angle < 30 and index_angle < 30 and middle_angle > 90:
-            return "OK"
-        
-        # Pointing
-        if index_angle < 30 and middle_angle > 90 and thumb_angle > 90:
-            return "Pointing"
-        
-        return "Unknown Gesture"
+# Data Collection (Simplified - You'll need to record your own data)
+def collect_data(num_samples=150):  # Increased number of samples
+    mp_hands = mp.solutions.hands.Hands(
+        max_num_hands=1,
+        min_detection_confidence=MIN_DETECTION_CONFIDENCE,
+        min_tracking_confidence=MIN_TRACKING_CONFIDENCE
+    )
+    data = []
+    labels = []
+    current_label = 0  # Start with gesture '0'
+    landmark_buffer = deque(maxlen=SMOOTHING_FRAMES)
 
-def main():
-    # Initialize optimizers
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Error: Could not open camera for data collection.")
+        return np.array(data), np.array(labels)
+
+    print("Press 'n' to switch to the next gesture.")
+    print("Press 'q' to finish data collection.")
+    print("Try to keep your hand relatively stable for a few seconds while recording each sample.")
+
+    while True:
+        success, frame = cap.read()
+        if not success:
+            print("Failed to read frame")
+            continue
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = mp_hands.process(frame_rgb)
+
+        if results.multi_hand_landmarks:
+            for landmarks in results.multi_hand_landmarks:
+                mp.solutions.drawing_utils.draw_landmarks(
+                    frame,
+                    landmarks,
+                    mp.solutions.hands.HAND_CONNECTIONS,
+                    mp.solutions.drawing_styles.get_default_hand_landmarks_style(),
+                    mp.solutions.drawing_styles.get_default_hand_connections_style()
+                )
+                landmark_list = np.array([[res.x, res.y, res.z] for res in landmarks.landmark]).flatten()
+                landmark_buffer.append(landmark_list)
+
+                if len(landmark_buffer) == SMOOTHING_FRAMES:
+                    smoothed_landmarks = np.mean(list(landmark_buffer), axis=0)
+                    data.append(smoothed_landmarks)
+                    labels.append(current_label)
+                    cv2.putText(frame, f"Gesture: {current_label}, Samples: {len(data)}/{num_samples * NUM_GESTURES}",
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    time.sleep(0.2)  # Small delay to avoid rapid sampling
+
+        cv2.imshow('Data Collection', frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('n'):
+            current_label = (current_label + 1) % NUM_GESTURES
+            print(f"Collecting data for gesture: {current_label}")
+        elif key == ord('q'):
+            break
+        elif len(data) >= num_samples * NUM_GESTURES:
+            print("Data collection complete.")
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    mp_hands.close()
+    return np.array(data), np.array(labels)
+
+# Model Training with AELM and MRFO
+def train_gesture_model_optimized(X_train, y_train, X_val, y_val, epochs=50, batch_size=32):
     aelm = AELM()
     mrfo = MRFO()
-    best_confidence, best_max_hands = mrfo.optimize_parameters()
-    selected_optimizer = aelm.evolve_optimizer()
-    
-    print(f"Optimized Parameters - Confidence: {best_confidence:.2f}, Max Hands: {best_max_hands}")
-    print(f"Selected Optimizer: {selected_optimizer}")
-    
-    # Initialize gesture recognition
-    gesture_recognizer = GestureRecognizer()
+    best_model = None
+    best_accuracy = 0.0
+    optimizer_history = []
+
+    for epoch in range(epochs):
+        lr, dropout = mrfo.optimize_hyperparams()
+        optimizer_name = aelm.evolve_optimizer(best_accuracy)
+        optimizer_history.append(optimizer_name)
+
+        if optimizer_name == 'adam':
+            optimizer = Adam(learning_rate=lr)
+        elif optimizer_name == 'rmsprop':
+            optimizer = RMSprop(learning_rate=lr)
+        elif optimizer_name == 'sgd':
+            optimizer = SGD(learning_rate=lr)
+
+        model = Sequential([
+            Dense(64, activation='relu', input_shape=(NUM_LANDMARKS,)),
+            Dropout(dropout),
+            Dense(128, activation='relu'),
+            Dropout(dropout),
+            Dense(NUM_GESTURES, activation='softmax')
+        ])
+
+        model.compile(optimizer=optimizer,
+                      loss='sparse_categorical_crossentropy',
+                      metrics=['accuracy'])
+
+        history = model.fit(X_train, y_train, epochs=1, batch_size=batch_size, validation_data=(X_val, y_val), verbose=0)
+        val_accuracy = history.history['val_accuracy'][0]
+
+        model.save('gesture_model.h5')
+        print("Model training completed and saved as gesture_model.h5")
+
+        # Evaluate the model on test set
+        test_loss, test_acc = model.evaluate(X_test_scaled, y_test)
+        print(f"Test accuracy: {test_acc:.4f}")
+
+        print(f"Epoch {epoch+1}/{epochs}, Optimizer: {optimizer_name}, LR: {lr:.4f}, Dropout: {dropout:.2f}, Validation Accuracy: {val_accuracy:.4f}")
+
+        if val_accuracy > best_accuracy:
+            best_accuracy = val_accuracy
+            best_model = model
+
+    print(f"Best Validation Accuracy: {best_accuracy:.4f}")
+    print(f"Optimizer Evolution History: {optimizer_history}")
+    return best_model
+
+# Gesture Recognition
+class NewGestureRecognizer:
+    def __init__(self, model_path='gesture_model.h5'):
+        self.mp_hands = mp.solutions.hands.Hands(
+            max_num_hands=1,
+            min_detection_confidence=MIN_DETECTION_CONFIDENCE,
+            min_tracking_confidence=MIN_TRACKING_CONFIDENCE
+        )
+        self.mp_drawing = mp.solutions.drawing_utils
+        try:
+            self.model = tf.keras.models.load_model(model_path)
+        except FileNotFoundError:
+            self.model = None
+            print(f"Warning: Model not found at {model_path}. Please train the model first.")
+        self.scaler = StandardScaler() # Will be loaded with training data scaling
+        try:
+            self.scaler.mean_ = np.load('scaler_mean.npy')
+            self.scaler.scale_ = np.load('scaler_scale.npy')
+        except FileNotFoundError:
+            print("Warning: Scaler parameters not found. Please train the model first.")
+
+    def process_frame(self, frame):
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.mp_hands.process(frame_rgb)
+        gesture = None
+
+        if self.model and hasattr(self.scaler, 'mean_'):
+            if results.multi_hand_landmarks:
+                for landmarks in results.multi_hand_landmarks:
+                    self.mp_drawing.draw_landmarks(frame, landmarks, mp.solutions.hands.HAND_CONNECTIONS)
+                    landmark_list = np.array([[res.x, res.y, res.z] for res in landmarks.landmark]).flatten()
+                    normalized_landmarks = self.scaler.transform([landmark_list])
+                    prediction = self.model.predict(normalized_landmarks, verbose=0)[0]
+                    predicted_label = np.argmax(prediction)
+                    confidence = np.max(prediction)
+                    gesture = str(predicted_label)
+
+        return frame, gesture
+
+def main_new_gesture():
+    # 1. Collect Data (Uncomment and run once to collect your gesture data)
+    print("Hello world")
+    collect_new_data = False# Set to True to collect new data
+    if collect_new_data:
+        data, labels = collect_data(num_samples=200)
+        if data.size > 0:
+            X_train, X_temp, y_train, y_temp = train_test_split(data, labels, test_size=0.3, random_state=42)
+            X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
+
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_val_scaled = scaler.transform(X_val)
+            X_test_scaled = scaler.transform(X_test)
+
+            best_gesture_model = train_gesture_model_optimized(X_train_scaled, y_train, X_val_scaled, y_val, epochs=50)
+            best_gesture_model.save('gesture_model.h5')
+            # Save the scaler's parameters for later use
+            np.save('scaler_mean.npy', scaler.mean_)
+            np.save('scaler_scale.npy', scaler.scale_)
+        else:
+            print("No data collected. Cannot train model.")
+            return
+
+    # 2. Load Trained Model and Scaler
+    scaler=StandardScaler()
+    recognizer = NewGestureRecognizer()
+    scaler.mean_ = np.load('scaler_mean.npy')
+    scaler.scale_ = np.load('scaler_scale.npy')
+
+    print("Attempting to open camera...")
     cap = cv2.VideoCapture(0)
-    
-    # Variables for termination
-    frames_without_gesture = 0
-    last_detection_time = time.time()
-    gesture_history = deque(maxlen=10)
+    if not cap.isOpened():
+        print("Error: Could not open camera.")
+        return
     
     try:
         while cap.isOpened():
-            success, image = cap.read()
+            success, frame = cap.read()
             if not success:
-                print("Ignoring empty camera frame.")
                 continue
-            
-            # Convert to RGB
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            image.flags.writeable = False
-            results = gesture_recognizer.hands.process(image)
-            
-            # Process results
-            image.flags.writeable = True
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-            gesture = None
-            
-            if results.multi_hand_landmarks:
-                for hand_landmarks in results.multi_hand_landmarks:
-                    # Draw landmarks
-                    gesture_recognizer.mp_drawing.draw_landmarks(
-                        image, hand_landmarks, gesture_recognizer.mp_hands.HAND_CONNECTIONS)
-                    
-                    # Recognize gesture
-                    gesture = gesture_recognizer.recognize_gesture(hand_landmarks.landmark)
-                    
-                    # Display gesture
-                    if gesture:
-                        cv2.putText(image, f"Gesture: {gesture}", (10, 30),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            
-            # Update termination conditions
-            if gesture and gesture != "Unknown Gesture":
-                frames_without_gesture = 0
-                last_detection_time = time.time()
-                gesture_history.append(gesture)
-            else:
-                frames_without_gesture += 1
-            
-            # Show frame
-            cv2.imshow('Gesture Recognition', image)
-            
-            # Check termination conditions
-            current_time = time.time()
-            if (frames_without_gesture >= MAX_FRAMES_WITHOUT_GESTURE or 
-                (current_time - last_detection_time) > 30):
-                print("\nTermination conditions met:")
-                print(f"- {frames_without_gesture} consecutive frames without recognized gesture")
-                print(f"- {current_time - last_detection_time:.1f} seconds since last detection")
-                print("\nGesture statistics:")
-                if gesture_history:
-                    print(f"Most common gesture: {max(set(gesture_history), key=gesture_history.count)}")
-                    print(f"All gestures detected: {list(gesture_history)}")
-                break
-            
+
+            frame = cv2.flip(frame, 1)
+            processed_frame, gesture = recognizer.process_frame(frame)
+
+            if gesture:
+                cv2.putText(processed_frame, f"Gesture: {gesture}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+            cv2.imshow('Hand Gesture Recognition', processed_frame)
             if cv2.waitKey(5) & 0xFF == ord('q'):
                 break
-                
+
     finally:
         cap.release()
         cv2.destroyAllWindows()
-        gesture_recognizer.hands.close()
 
 if __name__ == "__main__":
-    main()
+    main_new_gesture()
